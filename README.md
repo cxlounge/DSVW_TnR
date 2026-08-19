@@ -13,11 +13,13 @@ Quick start
 Run the following command:
 ```
 $ python3 dsvw.py 
-Damn Small Vulnerable Web (DSVW) < 100 LoC (Lines of Code) #v0.2a
+Damn Small Vulnerable Web (DSVW) < 100 LoC (Lines of Code) #v0.5
  by: Miroslav Stampar (@stamparm)
 
 [i] running HTTP server at 'http://127.0.0.1:65412'...
 ```
+
+Optionally, `--host=ADDR` and `--port=N` can be used to change the listening address and/or port (e.g. `python3 dsvw.py --host=0.0.0.0 --port=8080`).
 
 and navigate your browser to http://127.0.0.1:65412/:
 
@@ -33,3 +35,24 @@ To install lxml via pip, run the following command:
 ```
 pip install -r requirements.txt
 ```
+
+Docker
+----
+
+```
+$ docker build . -t dsvw && docker run -p 65412:65412 dsvw
+```
+
+Tests
+----
+
+The `tests` directory holds a stdlib-only regression suite that starts `dsvw.py` itself, walks through
+every attack case listed on the index page and checks that each one still works. All targets are local
+(a bundled HTTP fixture stands in for third-party sites), so the suite needs no Internet access:
+
+```
+$ python3 -m unittest discover -s tests -t tests -v
+```
+
+Tests requiring [sqlmap](https://sqlmap.org/) (end-to-end exploitation of the SQL injection points) are
+skipped automatically when it is not installed, while `DSVW_SKIP_SLOW=1` leaves out the time-based one.

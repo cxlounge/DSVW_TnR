@@ -11,14 +11,13 @@ RUN pex -r /source/requirements.txt -o /source/pex_wrapper
 
 FROM python:3.10-alpine3.18 AS final
 
-RUN apk upgrade --no-cache
+RUN apk upgrade --no-cache && apk --no-cache add libxml2 libxslt
 WORKDIR /dsvw
 RUN adduser -D dsvw && chown -R dsvw:dsvw /dsvw
 
 COPY dsvw.py .
-RUN sed -i 's/127.0.0.1/0.0.0.0/g' dsvw.py
-COPY --from=build /source /
+COPY --from=build /source/pex_wrapper /dsvw/pex_wrapper
 
 EXPOSE 65412
 USER dsvw
-CMD ["/dsvw/pex_wrapper", "dsvw.py"]
+CMD ["/dsvw/pex_wrapper", "dsvw.py", "--host=0.0.0.0"]
