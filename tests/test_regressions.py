@@ -172,6 +172,20 @@ class TestXmlDecoding(unittest.TestCase):
         response = server.get("/?xml=%s" % urllib.parse.quote('<root>caf\xe9</root>'.encode(), safe=""))
         self.assertIn("caf&#233;", response.body)
 
+    def test_remote_entity_is_expanded(self):
+        """libxml2 >= 2.13 (i.e. every recent 'pip install lxml') dropped HTTP, so DSVW has to fetch entities itself."""
+        document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/xxe.txt">]><root>&xxe;</root>' % fixture_url
+        response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("XXE-REMOTE-OK", response.body)
+
+    def test_remote_entity_uses_the_servers_own_fetcher(self):
+        """Proves the entity is retrieved by DSVW (browser User-Agent) instead of libxml2's own HTTP client."""
+        document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/ua-guard.txt">]><root>&xxe;</root>' % fixture_url
+        response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("UA-GUARD-OK", response.body)
+
     def test_local_entity_expansion_still_works(self):
         response = server.get("/?xml=%s" % urllib.parse.quote('<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/hostname">]><root>&e;</root>', safe=""))
         self.assertEqual(200, response.code, response.body[:400])

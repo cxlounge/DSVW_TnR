@@ -28,3 +28,18 @@ jobs:
 
       - name: Run tests
         run: python3 -m unittest discover -s tests -t tests -v
+
+  legacy-lxml:                                        # libxml2 < 2.13 still carries its own HTTP client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install legacy lxml
+        run: python3 -m pip install --upgrade pip && python3 -m pip install "lxml==5.2.1"
+
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -t tests -v

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import html, http.client, http.server, io, json, os, pickle, random, re, socket, socketserver, sqlite3, string, sys, subprocess, time, traceback, urllib.parse, urllib.request, xml.etree.ElementTree  # Python 3 required
-try: import lxml.etree
+try: import lxml.etree; RESOLVER = type("Resolver", (lxml.etree.Resolver,), {"resolve": lambda self, url, id, context: self.resolve_string(FETCH(url).read(), context) if url.startswith("http") else None})  # libxml2 >= 2.13 has no HTTP support of its own
 except ImportError: print("[!] please install 'python-lxml' to (also) get access to XML vulnerabilities (e.g. '%s')\n" % ("apt-get install python-lxml" if os.name != "nt" else "https://pypi.python.org/pypi/lxml"))
 
 NAME, VERSION, GITHUB, AUTHOR, LICENSE = "Damn Small Vulnerable Web (DSVW) < 100 LoC (Lines of Code)", "0.5", "https://github.com/stamparm/DSVW", "Miroslav Stampar (@stamparm)", "Unlicense (public domain)"
@@ -30,7 +30,7 @@ class ReqHandler(http.server.BaseHTTPRequestHandler):
                 elif "domain" in params:
                     content = subprocess.run("nslookup " + params["domain"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE, text=True, errors="replace").stdout
                 elif "xml" in params:
-                    content = lxml.etree.tostring(lxml.etree.parse(io.BytesIO(urllib.parse.unquote_to_bytes(re.search(r"(?:\A|[?&])xml=([^&]+)", query).group(1))), lxml.etree.XMLParser(load_dtd=True, resolve_entities=True, no_network=False)), pretty_print=True).decode()
+                    parser = lxml.etree.XMLParser(load_dtd=True, resolve_entities=True, no_network=False); parser.resolvers.add(RESOLVER()); content = lxml.etree.tostring(lxml.etree.parse(io.BytesIO(urllib.parse.unquote_to_bytes(re.search(r"(?:\A|[?&])xml=([^&]+)", query).group(1))), parser), pretty_print=True).decode()
                 elif "name" in params:
                     found = lxml.etree.parse(io.BytesIO(USERS_XML.encode())).xpath(".//user[name/text()='%s']" % params["name"])
                     content += "<b>Surname:</b> %s%s" % (found[-1].find("surname").text if found else "-", HTML_POSTFIX)

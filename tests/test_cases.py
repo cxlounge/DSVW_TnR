@@ -249,6 +249,14 @@ class TestCases(unittest.TestCase):
             self.skipTest("lxml not installed")
         self.assertNotIn("class=\"disabled\"", server.get("/").body)
 
+    def test_index_disables_xml_cases_without_lxml(self):
+        if HAS_LXML:
+            self.skipTest("lxml is installed")
+        body = server.get("/").body
+        expected = [name for name, vulnerable, exploit, info in dsvw.CASES if any(_ in name.upper() for _ in ("XML", "XPATH"))]
+        self.assertEqual(len(expected), body.count("class=\"disabled\""))
+        self.assertIn("module 'python-lxml' not installed", body)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
