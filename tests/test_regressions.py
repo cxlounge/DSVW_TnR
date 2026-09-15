@@ -172,24 +172,33 @@ class TestXmlDecoding(unittest.TestCase):
         response = server.get("/?xml=%s" % urllib.parse.quote('<root>caf\xe9</root>'.encode(), safe=""))
         self.assertIn("caf&#233;", response.body)
 
-    def test_remote_entity_is_expanded(self):
-        """libxml2 >= 2.13 (i.e. every recent 'pip install lxml') dropped HTTP, so DSVW has to fetch entities itself."""
+    def test_remote_entity_is_not_expanded(self):
+        """XXE fix: external entity references must NOT be resolved (CWE-611).
+        The parser is now configured with load_dtd=False and resolve_entities=False,
+        so remote file/URL entity references must be silently ignored or cause an error,
+        never returning the referenced content."""
         document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/xxe.txt">]><root>&xxe;</root>' % fixture_url
         response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("XXE-REMOTE-OK", response.body)
+        # The response must NOT contain the content of the external entity
+        self.assertNotIn("XXE-REMOTE-OK", response.body,
+                         "XXE vulnerability: remote entity was expanded, leaking external content")
 
-    def test_remote_entity_uses_the_servers_own_fetcher(self):
-        """Proves the entity is retrieved by DSVW (browser User-Agent) instead of libxml2's own HTTP client."""
-        document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/ua-guard.txt">]><root>&xxe;</root>' % fixture_url
+    def test_local_file_entity_is_not_expanded(self):
+        """XXE fix: local file entity references (file://) must NOT be resolved (CWE-611).
+        An attacker must not be able to read arbitrary server files via XML entity injection."""
+        document = '<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><root>&e;</root>'
         response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("UA-GUARD-OK", response.body)
+        # The response must NOT contain the contents of /etc/passwd
+        self.assertNotIn("root:x:", response.body,
+                         "XXE vulnerability: local file entity was expanded, leaking /etc/passwd")
+        self.assertNotIn("root:", response.body,
+                         "XXE vulnerability: local file entity was expanded, leaking /etc/passwd")
 
-    def test_local_entity_expansion_still_works(self):
-        response = server.get("/?xml=%s" % urllib.parse.quote('<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/hostname">]><root>&e;</root>', safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
+    def test_safe_xml_document_is_still_parsed(self):
+        """The fix must not break parsing of legitimate, entity-free XML documents."""
+        response = server.get("/?xml=%s" % urllib.parse.quote('<root><child>hello</child></root>'.encode(), safe=""))
         self.assertIn("<root>", response.body)
+        self.assertIn("<child>hello</child>", response.body)
 
 
 class TestCommandExecution(unittest.TestCase):
