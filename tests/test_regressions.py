@@ -283,6 +283,97 @@ class TestIncludedProgramSemantics(unittest.TestCase):
         self.assertIn("A-B!", response.body)
 
 
+class TestIncludeEnvSanitization(unittest.TestCase):
+    """The PATH key in the exec() globals must be the parsed URL path, not the raw self.path.
+
+    CWE-94: Code Injection — user-controlled data (self.path) must not flow
+    unmodified into the global namespace passed to exec().  The fix uses
+    urllib.parse.urlparse(self.path).path so that only the path component
+    (e.g. '/') reaches the script, never a query string or a forged value.
+    """
+
+    def include(self, source, selector=None):
+        """Write *source* to a temp file and fetch it via /?include=..."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-env-probe.tmp")
+        with open(path, "w") as handle:
+            handle.write(source)
+        try:
+            url = "/?include=%s" % harness.quoted(path)
+            if selector is not None:
+                url = selector + "&include=%s" % harness.quoted(path)
+            return server.get(url)
+        finally:
+            os.unlink(path)
+
+    def test_path_env_contains_only_the_url_path_component(self):
+        """PATH in the exec namespace must be the URL path, not the full self.path."""
+        # The script prints the PATH global that exec() receives.
+        response = self.include('print(PATH)\n')
+        self.assertEqual(200, response.code, response.body[:400])
+        # The PATH value must be '/' (the URL path), not a query string fragment.
+        self.assertIn("/", response.body)
+        # It must NOT contain query-string characters that would indicate self.path leaked.
+        self.assertNotIn("?", response.body.split("include=")[0] if "include=" in response.body else response.body)
+
+    def test_query_string_does_not_appear_in_path_env(self):
+        """A crafted query string must not flow into the PATH exec global."""
+        # Use a query string with a recognizable marker; if PATH == self.path the marker leaks.
+        marker = "QUERY-INJECT-MARKER"
+        path = os.path.join(harness.ROOT, "tests", "fixture-env-probe.tmp")
+        with open(path, "w") as handle:
+            handle.write('print(PATH)\n')
+        try:
+            selector = "/?extra=%s&include=%s" % (marker, harness.quoted(path))
+            response = server.get(selector)
+            self.assertEqual(200, response.code, response.body[:400])
+            # The marker lives in the query string; it must not appear in PATH.
+            self.assertNotIn(marker, response.body)
+        finally:
+            os.unlink(path)
+
+    def test_path_env_is_a_string_starting_with_slash(self):
+        """The sanitized PATH value must be a valid URL path (starts with '/')."""
+        response = self.include('print(PATH)\n')
+        self.assertEqual(200, response.code, response.body[:400])
+        # Strip whitespace and check the first character.
+        path_value = response.body.strip().split("\n")[0]
+        self.assertTrue(path_value.startswith("/"), "PATH env should start with '/': %r" % path_value)
+
+    def test_include_with_query_string_payload_does_not_inject_into_path_env(self):
+        """Embed code-like characters in the query string; they must not reach PATH in exec."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-env-probe.tmp")
+        with open(path, "w") as handle:
+            # The script tries to read PATH and print it; we check the server does not crash
+            # or expose the injected query-string content via PATH.
+            handle.write('print("PATH-VALUE:" + str(PATH))\n')
+        try:
+            # Craft a URL whose query portion contains characters that would be dangerous
+            # if they flowed into the exec namespace as part of PATH.
+            crafted = "/?cmd=__import__('os').system('id')&include=%s" % harness.quoted(path)
+            response = server.get(crafted)
+            self.assertEqual(200, response.code, response.body[:400])
+            body = response.body
+            # PATH must be just the URL path '/', not the full self.path
+            # which would contain the 'cmd=...' query fragment.
+            self.assertIn("PATH-VALUE:/", body)
+            self.assertNotIn("cmd=", body.split("PATH-VALUE:")[1] if "PATH-VALUE:" in body else body)
+        finally:
+            os.unlink(path)
+
+    def test_path_env_matches_urlparse_path(self):
+        """urlparse(self.path).path must equal what the included script sees as PATH."""
+        response = self.include('print("PARSED-PATH:" + PATH)\n')
+        self.assertEqual(200, response.code, response.body[:400])
+        # Extract the PATH value reported by the included script.
+        match = re.search(r"PARSED-PATH:([^\n]+)", response.body)
+        self.assertIsNotNone(match, "included script did not print PATH: %s" % response.body[:200])
+        reported_path = match.group(1).strip()
+        # The reported path must be parseable and equal to its own urlparse result
+        # (i.e. it is already a clean path, not a full URL with query string).
+        self.assertEqual(reported_path, urllib.parse.urlparse(reported_path).path,
+                         "PATH env value is not a clean URL path: %r" % reported_path)
+
+
 class TestRemoteFileInclusionIsolation(unittest.TestCase):
     """The remote file inclusion output capture must not hijack the server's global stdout."""
 
