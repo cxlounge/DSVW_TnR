@@ -340,6 +340,80 @@ class TestComments(unittest.TestCase):
         self.assertIn("Thank you for leaving the comment", server.get("/?comment=another").body)
 
 
+class TestStoredXssRemediation(unittest.TestCase):
+    """Regression tests for CWE-79 Stored XSS via the comment parameter.
+
+    Stored XSS occurs when an attacker saves a malicious payload into the
+    data-store and a later page load reflects it unescaped.  The fix wraps
+    every database cell in html.escape() before embedding it in HTML, so
+    angle brackets and quotes are rendered as character references instead of
+    being interpreted as markup by the browser.
+    """
+
+    def _store_and_retrieve(self, payload):
+        """Helper: POST the comment, then GET the listing page."""
+        server.get("/?comment=%s" % harness.quoted(payload))
+        return server.get("/?comment=")
+
+    def test_script_tag_payload_is_html_escaped_in_listing(self):
+        """A <script> comment must appear as &lt;script&gt;, not execute."""
+        payload = '<script>alert("xss")</script>'
+        response = self._store_and_retrieve(payload)
+        self.assertEqual(200, response.code, response.body[:400])
+        # The escaped entity form must be present …
+        self.assertIn("&lt;script&gt;", response.body)
+        # … and the raw tag must NOT be present inside a table cell
+        self.assertNotIn("<td><script>", response.body)
+
+    def test_img_onerror_payload_is_html_escaped_in_listing(self):
+        """An <img onerror=…> payload must be stored and served as plain text."""
+        payload = '<img src=x onerror=alert(1)>'
+        response = self._store_and_retrieve(payload)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("&lt;img", response.body)
+        self.assertNotIn("<td><img", response.body)
+
+    def test_double_quote_payload_is_html_escaped_in_listing(self):
+        """Double quotes in a comment must be encoded as &quot; to prevent
+        attribute-injection attacks."""
+        payload = '" onmouseover="alert(1)'
+        response = self._store_and_retrieve(payload)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("&quot;", response.body)
+        # Raw unescaped double quote must not appear as an attribute boundary
+        self.assertNotIn('<td>" onmouseover=', response.body)
+
+    def test_ampersand_payload_is_html_escaped_in_listing(self):
+        """Ampersands must be encoded as &amp; to prevent entity injection."""
+        payload = "A&amp;B<evil>"
+        response = self._store_and_retrieve(payload)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("&amp;", response.body)
+        self.assertNotIn("<td>A&amp;B<evil>", response.body)
+
+    def test_plain_text_comment_is_preserved_after_escaping(self):
+        """Ordinary comments must survive html.escape() unchanged."""
+        payload = "This is a normal comment"
+        response = self._store_and_retrieve(payload)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("This is a normal comment", response.body)
+
+    def test_comment_listing_page_is_valid_html_after_stored_payload(self):
+        """After storing a script payload the listing page must still be
+        syntactically well-formed HTML (no dangling tags)."""
+        server.get("/?comment=%s" % harness.quoted('<script>alert(0)</script>'))
+        response = server.get("/?comment=")
+        self.assertTrue(response.body.startswith("<!DOCTYPE html>"), response.body[:200])
+        self.assertTrue(response.body.rstrip().endswith("</html>"), response.body[-200:])
+
+    def test_stored_xss_payload_does_not_break_response_code(self):
+        """Storing and retrieving a XSS payload must still return HTTP 200."""
+        payload = '<script>document.cookie="stolen="+document.cookie</script>'
+        server.get("/?comment=%s" % harness.quoted(payload))
+        response = server.get("/?comment=")
+        self.assertEqual(200, response.code, response.body[:400])
+
+
 class TestSession(unittest.TestCase):
     def test_successful_login_sets_a_real_session_cookie(self):
         response = server.get("/login?username=admin&password=7en8aiDoh!")
