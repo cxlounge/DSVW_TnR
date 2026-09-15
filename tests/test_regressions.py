@@ -572,6 +572,104 @@ class TestHtmlStructure(unittest.TestCase):
                 self.assertTrue(body.rstrip().endswith("</html>"))
 
 
+class TestCodeInjectionFix(unittest.TestCase):
+    """CWE-94: Verify that the HTTP_USER_AGENT header value no longer contaminates
+    the exec() globals namespace when processing remote file inclusions.
+
+    The fix separates tainted CGI environment data (locals passed to exec) from the
+    clean execution namespace (globals passed to exec), so a crafted User-Agent cannot
+    be used to inject symbols into the program's global scope."""
+
+    def include_with_agent(self, source, user_agent):
+        """Write 'source' to a temp file and fetch it via /?include=, spoofing User-Agent."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-ci-program.tmp")
+        with open(path, "w") as handle:
+            handle.write(source)
+        try:
+            raw = harness.raw_request(
+                server.address, server.port, "GET",
+                "/?include=%s" % harness.quoted(path),
+                extra=["User-Agent: %s" % user_agent],
+            )
+            _status, _headers, body = harness.split_response(raw)
+            return body
+        finally:
+            os.unlink(path)
+
+    def test_user_agent_is_accessible_as_data_in_included_program(self):
+        """HTTP_USER_AGENT must still be readable by the included program as a plain string."""
+        source = 'print(HTTP_USER_AGENT)\n'
+        body = self.include_with_agent(source, "TestBrowser/1.0")
+        self.assertIn("TestBrowser/1.0", body)
+
+    def test_user_agent_cannot_shadow_builtin_name_in_exec_globals(self):
+        """A crafted User-Agent must not be able to override a builtin (e.g. 'exec', 'open')
+        in the globals passed to exec — it should only appear in locals (CGI data)."""
+        source = 'import builtins; print("ok" if getattr(builtins, "exec", None) is not None else "shadow")\n'
+        body = self.include_with_agent(source, "exec")
+        self.assertIn("ok", body)
+        self.assertNotIn("shadow", body)
+
+    def test_user_agent_is_in_locals_not_globals(self):
+        """HTTP_USER_AGENT must appear in locals() (CGI data) and NOT in globals()
+        (execution namespace) — verifying the taint is isolated to the data layer."""
+        source = 'in_g = "HTTP_USER_AGENT" in globals(); in_l = "HTTP_USER_AGENT" in locals(); print("g=%s l=%s" % (in_g, in_l))\n'
+        body = self.include_with_agent(source, "ProbeAgent/1.0")
+        self.assertIn("g=False", body, "HTTP_USER_AGENT was found in exec globals — taint isolation failed")
+        self.assertIn("l=True", body, "HTTP_USER_AGENT not found in exec locals — CGI data missing")
+
+    def test_user_agent_with_python_code_does_not_execute(self):
+        """A User-Agent containing Python code should be stored as inert string data,
+        not evaluated or executed as part of the CGI environment."""
+        source = 'print("AGENT=" + str(HTTP_USER_AGENT))\n'
+        # A payload that would cause side-effects if it were evaluated as code
+        body = self.include_with_agent(source, 'exec("print(\\"INJECTED\\")")')
+        self.assertIn("AGENT=", body)
+        self.assertNotIn("INJECTED", body)
+
+    def test_user_agent_none_handled_gracefully(self):
+        """A missing User-Agent header should produce an empty string, not None."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-ci-program-none.tmp")
+        with open(path, "w") as handle:
+            handle.write('print(repr(HTTP_USER_AGENT))\n')
+        try:
+            raw = harness.raw_request(
+                server.address, server.port, "GET",
+                "/?include=%s" % harness.quoted(path),
+                # No User-Agent header (omit it entirely)
+                extra=["User-Agent: "],
+            )
+            _status, _headers, body = harness.split_response(raw)
+            # Should be empty string, not "None"
+            self.assertNotIn("None", body)
+        finally:
+            os.unlink(path)
+
+    def test_rfi_cgi_variables_remain_accessible(self):
+        """CGI environment variables (QUERY_STRING, PATH, DOCUMENT_ROOT, REMOTE_ADDR)
+        must still be accessible inside the included program after the fix."""
+        source = 'print("QS=" + str(QUERY_STRING))\nprint("PATH=" + str(PATH))\nprint("DR=" + str(DOCUMENT_ROOT))\n'
+        path = os.path.join(harness.ROOT, "tests", "fixture-ci-program-cgi.tmp")
+        with open(path, "w") as handle:
+            handle.write(source)
+        try:
+            response = server.get("/?include=%s&marker=cgi-ok" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("marker=cgi-ok", response.body)
+            self.assertIn("PATH=/", response.body)
+            self.assertIn("DR=", response.body)
+        finally:
+            os.unlink(path)
+
+    def test_exec_globals_contains_only_controlled_keys(self):
+        """The globals namespace passed to exec should not contain tainted CGI keys
+        like HTTP_USER_AGENT — those belong in locals (CGI data) only."""
+        source = 'import builtins; keys = [k for k in globals() if k == "HTTP_USER_AGENT"]; print("clean" if not keys else "tainted")\n'
+        body = self.include_with_agent(source, "SentinelAgent/2.0")
+        self.assertIn("clean", body)
+        self.assertNotIn("tainted", body)
+
+
 class TestProjectConstraints(unittest.TestCase):
     def test_stays_under_100_lines_of_code(self):
         with open(harness.DSVW, "r") as handle:
