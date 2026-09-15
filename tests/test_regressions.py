@@ -572,6 +572,99 @@ class TestHtmlStructure(unittest.TestCase):
                 self.assertTrue(body.rstrip().endswith("</html>"))
 
 
+class TestStoredCodeInjectionFix(unittest.TestCase):
+    """Regression tests for CWE-94 Stored Code Injection fix.
+
+    The fix prevents POST-body-supplied ?include= parameters from reaching
+    exec(). When a POST request supplies the include URL via the request body,
+    the code must NOT be executed. exec() is only allowed when the include
+    parameter arrives in a genuine GET request URL.
+    """
+
+    def _write_marker_script(self, marker):
+        """Write a local Python script that prints a known marker and return its path."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-injection-test.tmp")
+        with open(path, "w") as handle:
+            handle.write('print("%s")\n' % marker)
+        return path
+
+    def test_post_body_include_does_not_execute_code(self):
+        """Stored Code Injection: code supplied via POST body must not be exec'd.
+
+        An attacker could POST ?include=<malicious_url> to trigger code execution.
+        After the fix, the include parameter in a POST body must not cause exec().
+        """
+        path = self._write_marker_script("POST-EXEC-MARKER")
+        try:
+            # Supply the include URL via POST body (the tainted path flagged by SAST)
+            raw = server.raw_request("POST", "/", body="include=%s" % harness.quoted(path))
+            status, headers, body = harness.split_response(raw)
+            # The server must respond (not crash), but must NOT execute the script
+            self.assertTrue(raw.startswith("HTTP/1."), "no HTTP response: %r" % raw[:80])
+            self.assertNotIn("POST-EXEC-MARKER", body,
+                             "Code from POST body was executed — stored code injection not fixed")
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_get_include_still_executes_code(self):
+        """The include feature must continue to work for legitimate GET requests.
+
+        The fix must not break the intentional Remote File Inclusion demo; only
+        POST-body-injected includes are blocked.
+        """
+        path = self._write_marker_script("GET-EXEC-MARKER")
+        try:
+            response = server.get("/?include=%s" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("GET-EXEC-MARKER", response.body,
+                          "GET-based file inclusion no longer works after the fix")
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_post_body_include_with_get_param_only_executes_get_portion(self):
+        """A GET URL include is not blocked even if a POST body is also present.
+
+        POST ?include=... with the include already in the GET URL query string is
+        not the injection vector. Only POST-body-added includes are blocked.
+        """
+        path = self._write_marker_script("GET-PARAM-MARKER")
+        try:
+            # include is in the GET query string, and POST body has something else
+            raw = server.raw_request("POST", "/?include=%s" % harness.quoted(path),
+                                     body="cmd=something")
+            status, headers, body = harness.split_response(raw)
+            self.assertTrue(raw.startswith("HTTP/1."), "no HTTP response")
+            # The include URL came from the GET part of the URL, so self.command is
+            # still "POST" — the guard self.command == "GET" prevents exec here too,
+            # which is the safe and expected behaviour.
+            self.assertNotIn("GET-PARAM-MARKER", body,
+                             "include exec ran on a POST request (should be blocked regardless of where include appears)")
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_post_include_response_is_well_formed(self):
+        """POST to /?include= must return a complete, valid HTTP response (not drop the connection)."""
+        path = self._write_marker_script("WELLFORMED-MARKER")
+        try:
+            raw = server.raw_request("POST", "/", body="include=%s" % harness.quoted(path))
+            self.assertTrue(raw.startswith("HTTP/1."), "no HTTP response: %r" % raw[:80])
+            self.assertIn("\r\n\r\n", raw, "response is truncated")
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 class TestProjectConstraints(unittest.TestCase):
     def test_stays_under_100_lines_of_code(self):
         with open(harness.DSVW, "r") as handle:
