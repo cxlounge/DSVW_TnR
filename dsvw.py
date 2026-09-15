@@ -24,7 +24,7 @@ class ReqHandler(http.server.BaseHTTPRequestHandler):
                 elif "v" in params:
                     content += re.sub(r"(v<b>)[^<]+(</b>)", lambda match: "%s%s%s" % (match.group(1), params["v"], match.group(2)), HTML_POSTFIX)
                 elif "object" in params:
-                    content = str(pickle.loads(urllib.parse.unquote_to_bytes(re.search(r"(?:\A|[?&])object=([^&]+)", query).group(1))))
+                    content = html.escape(str(pickle.loads(urllib.parse.unquote_to_bytes(re.search(r"(?:\A|[?&])object=([^&]+)", query).group(1)))))
                 elif "path" in params:
                     content = (open(os.path.abspath(params["path"]), "rb") if not "://" in params["path"] else FETCH(params["path"])).read().decode(errors="replace")
                 elif "domain" in params:
