@@ -582,5 +582,69 @@ class TestProjectConstraints(unittest.TestCase):
         self.assertIn("v<b>%s</b>" % dsvw.VERSION, server.get("/").body)
 
 
+class TestReflectedXssRemediation(unittest.TestCase):
+    """Verify that the ?object= endpoint HTML-encodes deserialized output (CVE: Reflected XSS via pickle output)."""
+
+    @staticmethod
+    def pickle_payload(obj):
+        """Return a percent-encoded pickle of *obj* suitable for the ?object= query parameter."""
+        return urllib.parse.quote(pickle.dumps(obj), safe="")
+
+    def test_html_special_chars_are_encoded_in_object_response(self):
+        """A dict whose repr contains '<', '>', '&', and '"' must be HTML-escaped in the response."""
+        # Craft a dict whose str() repr contains HTML special characters.
+        obj = {"<script>": "alert(\"xss\")&done"}
+        response = server.get("/?object=%s" % self.pickle_payload(obj))
+        self.assertEqual(200, response.code, response.body[:800])
+        # Raw HTML special characters must NOT appear in the response body.
+        self.assertNotIn("<script>", response.body)
+        self.assertNotIn('alert("xss")', response.body)
+        # HTML-encoded equivalents MUST appear instead.
+        self.assertIn("&lt;script&gt;", response.body)
+        self.assertIn("&amp;", response.body)
+
+    def test_script_tag_in_pickle_string_is_not_executable(self):
+        """A string value containing a raw <script> tag must be HTML-escaped, not rendered as markup."""
+        obj = "<script>alert(1)</script>"
+        response = server.get("/?object=%s" % self.pickle_payload(obj))
+        self.assertEqual(200, response.code, response.body[:800])
+        self.assertNotIn("<script>", response.body)
+        self.assertIn("&lt;script&gt;", response.body)
+
+    def test_angle_brackets_are_encoded(self):
+        """'<' and '>' in the object's string representation must always be HTML-encoded."""
+        obj = {"key": "<value>"}
+        response = server.get("/?object=%s" % self.pickle_payload(obj))
+        self.assertEqual(200, response.code, response.body[:800])
+        self.assertNotIn("<value>", response.body)
+        self.assertIn("&lt;value&gt;", response.body)
+
+    def test_ampersand_is_encoded(self):
+        """'&' in the deserialized object must be encoded as '&amp;' to prevent HTML injection."""
+        obj = {"a": "b&c=d"}
+        response = server.get("/?object=%s" % self.pickle_payload(obj))
+        self.assertEqual(200, response.code, response.body[:800])
+        self.assertNotIn("b&c=d", response.body)
+        self.assertIn("&amp;", response.body)
+
+    def test_legitimate_pickle_data_still_deserializes_and_displays(self):
+        """Ensure functional regression: normal data is still shown (just HTML-encoded)."""
+        obj = {"username": "admin", "role": "user"}
+        response = server.get("/?object=%s" % self.pickle_payload(obj))
+        self.assertEqual(200, response.code, response.body[:800])
+        # The key/value text must still be present (no data loss).
+        self.assertIn("admin", response.body)
+        self.assertIn("username", response.body)
+
+    def test_post_with_xss_payload_in_object_is_encoded(self):
+        """POST-method delivery of an XSS payload via ?object= must also be HTML-escaped."""
+        obj = "<img src=x onerror=alert(1)>"
+        raw = server.raw_request("POST", "/", body="object=%s" % urllib.parse.quote(pickle.dumps(obj), safe=""))
+        status, headers, body = harness.split_response(raw)
+        self.assertIn("200", status)
+        self.assertNotIn("<img src=x", body)
+        self.assertIn("&lt;img", body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
