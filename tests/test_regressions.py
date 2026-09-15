@@ -4,8 +4,8 @@
 
 import html.parser
 import importlib.util
+import json
 import os
-import pickle
 import re
 import sys
 import threading
@@ -117,28 +117,61 @@ class TestReflectedVersion(unittest.TestCase):
         self.assertTrue(response.body.rstrip().endswith("</html>"))
 
 
-class TestPickleDemo(unittest.TestCase):
-    @staticmethod
-    def users_object(protocol=None):
-        users = dict((_.findtext("username"), (_.findtext("name"), _.findtext("surname"))) for _ in xml.etree.ElementTree.fromstring(dsvw.USERS_XML).findall("user"))
-        return urllib.parse.quote(pickle.dumps(users) if protocol is None else pickle.dumps(users, protocol))
+class TestJsonDeserialization(unittest.TestCase):
+    """Tests for the ?object= endpoint after migration from pickle to safe JSON deserialization."""
 
-    def test_shipped_object_demo_deserializes(self):
+    @staticmethod
+    def users_object():
+        # Build the same user dict that the demo link sends, serialised as JSON
+        users = dict((_.findtext("username"), [_.findtext("name"), _.findtext("surname")]) for _ in xml.etree.ElementTree.fromstring(dsvw.USERS_XML).findall("user"))
+        return urllib.parse.quote(json.dumps(users))
+
+    def test_json_object_demo_deserializes(self):
+        """A well-formed JSON payload must be deserialized and its content shown."""
         response = server.get("/?object=%s" % self.users_object())
         self.assertEqual(200, response.code, response.body[:800])
         self.assertIn("dricci", response.body)
 
-    def test_every_pickle_protocol_round_trips(self):
-        for protocol in range(0, pickle.HIGHEST_PROTOCOL + 1):
-            with self.subTest(protocol=protocol):
-                response = server.get("/?object=%s" % self.users_object(protocol))
+    def test_simple_json_types_round_trip(self):
+        """JSON strings, numbers, lists, and nested dicts are all returned correctly."""
+        for payload, expected in (
+            (json.dumps({"key": "value"}), "key"),
+            (json.dumps([1, 2, 3]), "1, 2, 3"),
+            (json.dumps("hello"), "hello"),
+            (json.dumps(42), "42"),
+        ):
+            with self.subTest(payload=payload):
+                response = server.get("/?object=%s" % urllib.parse.quote(payload))
                 self.assertEqual(200, response.code, response.body[:400])
-                self.assertIn("dricci", response.body)
+                self.assertIn(expected, response.body)
 
-    def test_arbitrary_code_execution_payload_still_works(self):
-        response = server.get("/?object=%s" % urllib.parse.quote("cos\nsystem\n(S'true'\ntR."))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertEqual("0", response.body.strip())
+    def test_pickle_payload_is_rejected(self):
+        """A raw pickle stream (which used to allow arbitrary code execution) must now be
+        treated as invalid JSON and must NOT execute any code — the response must be an
+        error, not the string '0' that a successful 'true' shell command would return."""
+        # This is the classic REDUCE opcode payload: cos\nsystem\n(S'true'\ntR.
+        pickle_payload = "cos\nsystem\n(S'true'\ntR."
+        response = server.get("/?object=%s" % urllib.parse.quote(pickle_payload))
+        # The server must not execute the payload; it returns 200 with an error traceback
+        # (because json.loads raises ValueError) rather than the command exit code "0".
+        self.assertNotEqual("0", response.body.strip(),
+                            "pickle payload was executed — deserialization is still unsafe")
+        # The response must not contain output that proves os.system('true') ran cleanly
+        self.assertNotIn(">0<", response.body)
+
+    def test_malformed_json_returns_error_not_500_crash(self):
+        """Malformed JSON must return a parseable HTTP response (even if it's a 500)."""
+        raw = server.raw_get("/?object=%s" % urllib.parse.quote("{not valid json"))
+        self.assertTrue(raw.startswith("HTTP/1."), "no HTTP response for malformed JSON: %r" % raw[:80])
+        self.assertIn("\r\n\r\n", raw, "truncated response for malformed JSON")
+
+    def test_object_endpoint_does_not_appear_as_pickle_demo_in_attack_list(self):
+        """The attack list must no longer advertise the pickle RCE exploit link."""
+        response = server.get("/")
+        self.assertEqual(200, response.code)
+        # The old exploit URL that embedded raw pickle opcodes should not appear
+        self.assertNotIn("cos%0Asystem%0A", response.body,
+                         "Old pickle exploit URL still present in attack list")
 
 
 class TestFileDisclosure(unittest.TestCase):
