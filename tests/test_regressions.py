@@ -283,6 +283,87 @@ class TestIncludedProgramSemantics(unittest.TestCase):
         self.assertIn("A-B!", response.body)
 
 
+class TestIncludeExecNamespace(unittest.TestCase):
+    """CWE-94: user-supplied HTTP path must not reach the exec() namespace as a tainted value.
+
+    The SAST finding (Code_Injection, CWE-94) traced the taint flow:
+        self.path (HTTP request) -> path variable -> envs["PATH"] -> exec(program, envs)
+
+    The fix replaces the tainted `path` with the constant "/" so the user cannot
+    influence the execution environment through that channel.
+    """
+
+    def include(self, source):
+        """Write `source` to a temp file and request it via /?include=."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-exec-ns.tmp")
+        with open(path, "w") as handle:
+            handle.write(source)
+        try:
+            return server.get("/?include=%s" % harness.quoted(path))
+        finally:
+            os.unlink(path)
+
+    def test_path_env_is_not_user_controlled_request_path(self):
+        """PATH in the exec namespace must be the safe constant "/", not the request path."""
+        # The included program prints the value of PATH from its own globals (the envs dict).
+        # Before the fix PATH was the raw HTTP path string; after the fix it must be "/".
+        response = self.include('import builtins; print(PATH)\n')
+        self.assertEqual(200, response.code, response.body[:400])
+        # The response body must contain exactly "/" and not the full request path.
+        body = response.body.strip()
+        self.assertIn("/", body)
+        # The request URL contains "?include=..." - the original tainted path would include
+        # the word "include".  After the fix, PATH must not contain "include".
+        self.assertNotIn("include", body, "tainted HTTP path leaked into exec namespace PATH")
+
+    def test_path_env_value_is_the_safe_constant(self):
+        """PATH in the exec namespace must be the literal safe constant "/"."""
+        response = self.include('print(repr(PATH))\n')
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("'/'", response.body, "PATH in exec namespace should be the constant \"/\"")
+
+    def test_query_string_is_still_available_in_namespace(self):
+        """QUERY_STRING must still be populated so existing RFI programs work correctly."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-qs-check.tmp")
+        with open(path, "w") as handle:
+            handle.write('print("QS_PRESENT" if QUERY_STRING else "QS_ABSENT")\n')
+        try:
+            response = server.get("/?include=%s&marker=1" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("QS_PRESENT", response.body)
+        finally:
+            os.unlink(path)
+
+    def test_included_program_cannot_read_arbitrary_path_via_namespace(self):
+        """Injecting a crafted HTTP path like /?include=...&x=../../../etc/passwd must not
+        cause PATH in the exec namespace to contain path-traversal sequences."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-path-check.tmp")
+        with open(path, "w") as handle:
+            handle.write('print(PATH)\n')
+        try:
+            # Request with a crafted query that previously would embed the full path in envs
+            response = server.get("/?include=%s&x=..%%2F..%%2Fetc%%2Fpasswd" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:400])
+            body = response.body.strip()
+            # PATH must be "/" - no traversal sequences should appear
+            self.assertNotIn("..", body, "path-traversal sequence leaked into exec namespace PATH")
+            self.assertNotIn("etc", body, "path-traversal sequence leaked into exec namespace PATH")
+        finally:
+            os.unlink(path)
+
+    def test_include_functionality_still_works_after_fix(self):
+        """The RFI feature must keep working end-to-end after the fix."""
+        response = self.include('print("INCLUDE-STILL-WORKS")\n')
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("INCLUDE-STILL-WORKS", response.body)
+
+    def test_document_root_still_set_in_namespace(self):
+        """DOCUMENT_ROOT must still be available so included programs can locate files."""
+        response = self.include('print("DR_SET" if DOCUMENT_ROOT else "DR_MISSING")\n')
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("DR_SET", response.body)
+
+
 class TestRemoteFileInclusionIsolation(unittest.TestCase):
     """The remote file inclusion output capture must not hijack the server's global stdout."""
 
