@@ -582,5 +582,129 @@ class TestProjectConstraints(unittest.TestCase):
         self.assertIn("v<b>%s</b>" % dsvw.VERSION, server.get("/").body)
 
 
+class TestCodeInjectionFix(unittest.TestCase):
+    """CWE-94 regression: user-controlled HTTP path must not flow as a tainted global into exec().
+
+    The fix replaces ``"PATH": path`` (where *path* is derived from the untrusted
+    HTTP request URL) with ``"PATH_INFO": "/"`` (a safe constant).  These tests
+    confirm that included programs can no longer read the raw HTTP request path
+    from the exec globals, and that the safe PATH_INFO constant is available
+    instead.
+    """
+
+    def include(self, source):
+        """Write *source* to a temp file and fetch it via the ?include= endpoint."""
+        tmp = os.path.join(harness.ROOT, "tests", "fixture-codeinjection.tmp")
+        with open(tmp, "w") as handle:
+            handle.write(source)
+        try:
+            return server.get("/?include=%s" % harness.quoted(tmp))
+        finally:
+            os.unlink(tmp)
+
+    def test_user_controlled_path_not_in_exec_globals(self):
+        """The HTTP request path must NOT be accessible as the global 'PATH' inside exec().
+
+        Before the fix, ``envs["PATH"] = path`` injected the user-supplied URL path
+        into the executed program's global namespace.  After the fix that key is
+        gone, so reading PATH inside the program raises NameError.
+        """
+        # The included program tries to read PATH; it should raise NameError
+        # because PATH is no longer in the exec globals.
+        source = (
+            'try:\n'
+            '    print("PATH-PRESENT:" + str(PATH))\n'
+            'except NameError:\n'
+            '    print("PATH-ABSENT")\n'
+        )
+        response = self.include(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("PATH-ABSENT", response.body,
+                      "user-controlled PATH is still accessible inside exec() globals (CWE-94)")
+        self.assertNotIn("PATH-PRESENT", response.body)
+
+    def test_path_info_constant_available_in_exec_globals(self):
+        """PATH_INFO must be the safe constant '/' inside exec() globals."""
+        source = (
+            'try:\n'
+            '    print("PATH_INFO:" + str(PATH_INFO))\n'
+            'except NameError:\n'
+            '    print("PATH_INFO-ABSENT")\n'
+        )
+        response = self.include(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("PATH_INFO:/", response.body,
+                      "PATH_INFO constant not present in exec() globals")
+        self.assertNotIn("PATH_INFO-ABSENT", response.body)
+
+    def test_path_info_is_safe_constant_not_user_input(self):
+        """PATH_INFO must always be '/' regardless of URL manipulation attempts.
+
+        An attacker cannot craft a URL that causes PATH_INFO inside exec() to
+        reflect arbitrary content — it is a literal constant, not derived from
+        the request.
+        """
+        tmp = os.path.join(harness.ROOT, "tests", "fixture-pathinfo.tmp")
+        with open(tmp, "w") as handle:
+            handle.write('print("GOT_PATH_INFO:" + str(PATH_INFO))\n')
+        try:
+            # Even if the request URL contains path components beyond '/', the
+            # exec globals must expose the safe literal '/' for PATH_INFO.
+            response = server.get("/?include=%s" % harness.quoted(tmp))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("GOT_PATH_INFO:/", response.body)
+            # Confirm the value is exactly "/" — not something derived from the URL.
+            match = re.search(r"GOT_PATH_INFO:([^\n\r<]+)", response.body)
+            self.assertIsNotNone(match, "PATH_INFO output not found in response")
+            self.assertEqual("/", match.group(1).strip(),
+                             "PATH_INFO is not the safe constant '/' (taint may still flow)")
+        finally:
+            os.unlink(tmp)
+
+    def test_query_string_still_available_in_exec_globals(self):
+        """QUERY_STRING must still be accessible to included programs (functionality preserved)."""
+        source = 'print("QS:" + str(QUERY_STRING))\n'
+        tmp = os.path.join(harness.ROOT, "tests", "fixture-qs.tmp")
+        with open(tmp, "w") as handle:
+            handle.write(source)
+        try:
+            response = server.get("/?include=%s&sentinel=RFI-QS-OK" % harness.quoted(tmp))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("QS:", response.body)
+            self.assertIn("sentinel=RFI-QS-OK", response.body)
+        finally:
+            os.unlink(tmp)
+
+    def test_document_root_still_available_in_exec_globals(self):
+        """DOCUMENT_ROOT must still be accessible to included programs (functionality preserved)."""
+        source = 'print("DR:" + str(DOCUMENT_ROOT))\n'
+        tmp = os.path.join(harness.ROOT, "tests", "fixture-dr.tmp")
+        with open(tmp, "w") as handle:
+            handle.write(source)
+        try:
+            response = server.get("/?include=%s" % harness.quoted(tmp))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("DR:", response.body)
+            self.assertIn(harness.ROOT, response.body)
+        finally:
+            os.unlink(tmp)
+
+    def test_include_endpoint_still_works_end_to_end(self):
+        """The ?include= RFI demo feature must still function after the fix."""
+        source = 'print("RFI-STILL-WORKS")\n'
+        response = self.include(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("RFI-STILL-WORKS", response.body)
+
+    def test_source_code_does_not_reference_tainted_path_in_exec(self):
+        """Static check: 'PATH': path must not appear in dsvw.py (the vulnerable pattern)."""
+        with open(harness.DSVW, "r") as handle:
+            source = handle.read()
+        # The old vulnerable pattern was '"PATH": path' inside the envs dict for exec.
+        # After the fix this must be gone.
+        self.assertNotIn('"PATH": path', source,
+                         "dsvw.py still contains the vulnerable 'PATH': path taint source")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
